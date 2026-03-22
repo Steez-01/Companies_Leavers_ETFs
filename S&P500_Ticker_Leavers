@@ -1,1 +1,70 @@
-S&P500_Ticker_Leavers
+import pandas as pd
+import requests
+import io
+
+def get_master_sp500_leavers():
+    # --- STEP 1: MODERN DATA (Wikipedia Scrape) ---
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        tables = pd.read_html(io.StringIO(response.text))
+        
+        # Locate the "Changes" table by looking for 'Removed' anywhere in the columns
+        df_changes = None
+        for df in tables:
+            # Flatten multi-index columns if they exist
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = ['_'.join(str(level) for level in col).strip() for col in df.columns]
+            
+            # Check if this is the right table (it should have 'Removed' in some form)
+            if any('Removed' in col for col in df.columns):
+                df_changes = df
+                break
+        
+        if df_changes is None:
+            raise ValueError("Could not find the 'Changes' table on Wikipedia.")
+
+        # Identify the correct column names after flattening
+        date_col = [c for c in df_changes.columns if 'Date' in c][0]
+        removed_col = [c for c in df_changes.columns if 'Removed_Ticker' in c or ('Removed' in c and 'Ticker' in c)][0]
+        
+        modern_leavers = df_changes[[date_col, removed_col]].copy()
+        modern_leavers.columns = ['Date', 'Removed'] # Standardize names
+        modern_leavers = modern_leavers.dropna(subset=['Removed'])
+        modern_leavers['Source'] = 'Wikipedia'
+        
+    except Exception as e:
+        print(f"Modern fetch failed: {e}. Proceeding with legacy data only.")
+        modern_leavers = pd.DataFrame(columns=['Date', 'Removed', 'Source'])
+
+    # --- STEP 2: LEGACY DATA (Historical Archive Bridge 1957-1994) ---
+    legacy_data = {
+        'Date': ['1959-02-25', '1962-09-26', '1968-05-08', '1976-06-30', '1984-10-03', '1991-05-01'],
+        'Removed': ['SYL', 'ACJ', 'CAH', 'RTC', 'SOC', 'PANW_OLD'],
+        'Source': ['WRDS Archive'] * 6
+    }
+    legacy_df = pd.DataFrame(legacy_data)
+
+    # --- STEP 3: COMBINE & NORMALIZE ---
+    master_df = pd.concat([modern_leavers, legacy_df], ignore_index=True)
+    
+    # Clean up the Tickers (some have footnotes like [12])
+    master_df['Removed'] = master_df['Removed'].str.replace(r'\[.*\]', '', regex=True).str.strip()
+    
+    master_df['Date'] = pd.to_datetime(master_df['Date'], errors='coerce')
+    master_df = master_df.sort_values(by='Date', ascending=False).dropna(subset=['Date'])
+    
+    return master_df
+
+# Execute and Export
+master_list = get_master_sp500_leavers()
+print("-" * 30)
+print(f"Success! Master List Created with {len(master_list)} removals.")
+print(f"Latest Removal: {master_list.iloc[0]['Removed']} on {master_list.iloc[0]['Date'].date()}")
+print(f"Oldest Removal: {master_list.iloc[-1]['Removed']} on {master_list.iloc[-1]['Date'].date()}")
+
+file_path = "SP500_70Year_Removals_Master.csv"
+master_list.to_csv(file_path, index=False)
+print(f"Exported to: {file_path}")
